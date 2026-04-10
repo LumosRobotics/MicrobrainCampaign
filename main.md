@@ -14,6 +14,28 @@ Whether you're building a robot, a sensor node, a motion control system, or a fi
 
 ---
 
+## Why Not Just Use an Arduino?
+
+Fair question. The embedded world does not need another general-purpose development board with a USB port and an LED. MicroBrain is not that.
+
+Arduino and its clones are designed to sit on a desk during development. They are optimised for ease of programming, broad library support, and experimentation. That is genuinely useful — but it is a different problem than the one MicroBrain solves.
+
+MicroBrain is designed to be **deployed inside a system** and stay there. The differences that follow from that are not cosmetic:
+
+**The communication bus is different.** Arduino boards talk over USB, WiFi, or Bluetooth — protocols that are fine for a bench setup but poorly suited to the inside of a robot or a machine. MicroBrain uses CAN FD: a differential, noise-tolerant, multi-node bus that was built for exactly the environments where motors are spinning, cables are flexing, and electrical interference is a fact of life. It is the same bus that runs inside every modern car.
+
+**The form factor is different.** Most Arduino-family boards are sized for a breadboard, not a robot frame. MicroBrain is sized to disappear into a system — 17.2 × 17.2 mm, with mounting holes and JST connectors that route cleanly through a cable chain.
+
+**The MCU is different.** The STM32G0 is a production-grade microcontroller used in commercial and industrial products. It is not a hobbyist chip dressed up as one. The toolchain that supports it — real GCC, real CMake, real debuggers — is the same toolchain used in professional embedded development.
+
+**The shield connector is different.** FeatherWings, Arduino shields, and most expansion boards connect via through-hole headers that must be soldered. MicroBrain's mezzanine connector mates directly with no soldering, no alignment fuss, and no solder joints to work loose under vibration.
+
+**The intent is different.** Arduino asks: *how do I make embedded programming accessible?* MicroBrain asks: *how do I make a deployable, distributed embedded system fast to build and easy to reconfigure?* Those are not the same question, and they lead to very different hardware.
+
+If you want to learn to program microcontrollers, Arduino is a great choice. If you want to build a robot, a drone, or a machine with multiple smart nodes that communicate reliably and fit where you need them — that is what MicroBrain is for.
+
+---
+
 ## The MicroBrain Module
 
 The core of the ecosystem. The MicroBrain is a tiny PCB built around the **STM32G0 microcontroller** paired with a **CAN FD transceiver**, designed to be the edge brain of any distributed system.
@@ -28,11 +50,23 @@ Size was a first-class design constraint throughout the ecosystem. The MicroBrai
 - **Board-to-board mezzanine connector** for attaching compatible shields directly underneath
   - 5V power rail
   - 12 GPIOs including UART, SPI, and I2C
-- **JST connector 1** — CAN FD bus connection
-- **JST connector 2** — two GPIO pins with I2C and UART support, for peripheral modules
+- **JST connector 1** — CAN FD bus connection, also carries 5V power input
+- **JST connector 2** — two GPIO pins with I2C and UART support for peripheral modules, also carries 5V power input
 - Designed for size: small enough to embed anywhere
 
 The mezzanine connector is the heart of the shield ecosystem. It carries power and the full GPIO set, so shields can use any combination of UART, SPI, and I2C without additional wiring.
+
+**Power** is supplied over 5V on either JST connector — whichever is most convenient for your wiring. In a CAN FD network, power typically comes in on the CAN connector alongside the bus signals, so a node is fully powered and connected with a single cable. Alternatively, if a node is running a peripheral module without being part of a CAN network, it can be powered from the peripheral JST connector instead. Either way, no dedicated power connector is needed.
+
+---
+
+## What Is CAN FD?
+
+CAN (Controller Area Network) is a communication bus originally developed for automotive applications in the 1980s. It was designed to let many microcontrollers and devices talk to each other over a simple two-wire bus without a central host — and to do so reliably in electrically noisy environments like cars and industrial machinery. Decades later, it remains the backbone of nearly every modern vehicle and a large portion of industrial and robotics systems, largely because it is robust in ways that protocols like UART, SPI, and I2C simply are not.
+
+CAN FD (Flexible Data-rate) is the modern evolution of the standard. It lifts two of the original CAN limitations: the data payload per message was expanded from 8 bytes to up to 64 bytes, and the transmission speed can step up to 8 Mbps during the data phase of each frame. For practical purposes this means faster, denser communication between nodes while retaining everything that made classic CAN dependable — differential signalling for noise immunity, hardware-level error detection, automatic retransmission, and the ability to add or remove nodes from the bus without disrupting the rest of the network.
+
+For a distributed robotics or drone system, these properties matter. A CAN FD bus can run across the length of a robot frame or through a cable chain without signal integrity issues that would plague I2C or UART at the same distances. Multiple MicroBrain nodes share the same two-wire bus — each with its own address, each independently powered — and the system keeps working even if one node loses power or is disconnected. This is the same fundamental architecture used in every modern car, and it translates directly to robust distributed embedded systems outside of automotive.
 
 ---
 
@@ -105,6 +139,70 @@ Each node processes its own sensor data locally and reports over CAN FD, a bus d
 
 The form factor makes this practical rather than theoretical. A MicroBrain node with a shield is small enough to tuck into spaces that would fit nothing else, and the JST connectors mean it can be installed and removed without tools.
 
+### A Worked Example: Three Nodes on One Bus
+
+To make this concrete, consider a small robot with three MicroBrain nodes on a shared CAN FD bus running at **1 Mbps**.
+
+**Node 1 — ToF Shield** (obstacle detection, 15 Hz)
+The 8×8 distance grid produces 64 measurements at 16 bits each — 128 bytes per reading. CAN FD's maximum payload is 64 bytes, so each ToF update is split across **2 frames**. At 15 Hz that is **30 frames/second** from this node.
+
+**Node 2 — IMU Shield** (motion tracking, 200 Hz)
+Three axes of accelerometer and three of gyroscope, each 16-bit, gives 12 bytes of sensor data. Add a 4-byte sequence counter and the whole update fits comfortably in **1 frame of 16 bytes**. At 200 Hz that is **200 frames/second**.
+
+**Node 3 — StepperMotorDriver Shield** (position control, 100 Hz)
+Each control cycle produces one outbound command frame (target position + speed, 8 bytes) and one inbound status frame (current position + flags, 8 bytes) — **2 frames per cycle**, or **200 frames/second** at 100 Hz.
+
+| Node | Payload | Frames/update | Update rate | Frames/sec |
+|------|---------|--------------|-------------|------------|
+| ToF | 128 bytes (2 × 64 B) | 2 | 15 Hz | 30 |
+| IMU | 16 bytes (1 × 16 B) | 1 | 200 Hz | 200 |
+| Stepper cmd + status | 8 + 8 bytes (2 × 8 B) | 2 | 100 Hz | 200 |
+| **Total** | | | | **430 frames/sec** |
+
+At 1 Mbps, each bit takes 1 µs. A CAN FD frame is not just the raw data — it includes an identifier, control fields, CRC, acknowledgement, and end-of-frame sequence, plus bit stuffing overhead. Accounting for all of this:
+
+| Frame size | Approximate bus time |
+|------------|----------------------|
+| 64 bytes | ~700 µs |
+| 16 bytes | ~220 µs |
+| 8 bytes | ~140 µs |
+
+Multiplying through:
+
+| Node | Frames/sec | Frame size | Bus time/sec | Utilisation |
+|------|------------|------------|-------------|------------|
+| ToF | 30 | 64 B | 21,000 µs | 2.1% |
+| IMU | 200 | 16 B | 44,000 µs | 4.4% |
+| Stepper | 200 | 8 B | 28,000 µs | 2.8% |
+| **Total** | **430** | | **93,000 µs** | **~9.3%** |
+
+Three active sensor and actuator nodes consume roughly **one tenth of the available bus bandwidth**. The remaining ~90% is headroom for more nodes, faster update rates, a central controller sending commands back down the bus, or diagnostic and logging traffic — all without touching the bus configuration.
+
+### A Second Example: 20 Stepper Motor Nodes
+
+Consider a larger machine — a multi-axis system, a robotic gantry, or a modular conveyor — with **20 MicroBrain nodes** each running a StepperMotorDriver Shield. Every node exchanges one 8-byte command frame and one 8-byte status frame per control cycle: **2 frames per node per cycle**.
+
+At **100 Hz** across all 20 nodes:
+
+| | Value |
+|---|---|
+| Nodes | 20 |
+| Frames per node per cycle | 2 (cmd + status) |
+| Total frames per cycle | 40 |
+| Update rate | 100 Hz |
+| Total frames/sec | 4,000 |
+| Bus time per 8-byte frame | ~140 µs |
+| Total bus time/sec | 560,000 µs |
+| **Bus utilisation** | **56%** |
+
+56% utilisation — over half the bus consumed, but the system is still comfortably within headroom. The remaining 44% is available for supervisory traffic, fault reporting, or additional sensor nodes on the same bus.
+
+**What is the maximum achievable update rate?**
+
+At 1 Mbps there are 1,000,000 µs of bus time available per second. Each full cycle across all 20 nodes costs 40 × 140 µs = 5,600 µs. At 100% theoretical utilisation that allows 1,000,000 / 5,600 ≈ **178 cycles/sec**. Leaving a practical headroom margin of ~20%, a sustainable maximum sits around **~140 Hz** for all 20 nodes simultaneously — still well above the 100 Hz baseline.
+
+For comparison, a classic CAN 2.0 bus at 500 kbps with 8-byte frames carries roughly half the throughput of this configuration and lacks the larger payload options that make sensor data efficient to transmit. CAN FD at 1 Mbps handles a 20-node motion control system with room to spare.
+
 ---
 
 ## The Toolchain: lumos
@@ -117,9 +215,7 @@ Hardware that's easy to connect should be equally easy to program. That's where 
 - **Build** — compiles your code using a bundled ARM GCC toolchain, no manual compiler setup required
 - **Flash** — program your MicroBrain directly from the command line
 
-No hunting for the right toolchain version, no CMake configuration from scratch, no environment variables to wrangle. Clone, create, build, flash. If you prefer to set up your own toolchain or integrate with an existing build system, that is of course also a viable option - standard ARM GCC and CMake workflows are fully supported, and configuration files are included for manual builds.
-
-If you prefer to use your own toolchain or integrate with an existing build system, `lumos` gets out of the way — standard ARM GCC and CMake workflows are fully supported.
+No hunting for the right toolchain version, no CMake configuration from scratch, no environment variables to wrangle. Clone, create, build, flash. If you prefer to set up your own toolchain or integrate with an existing build system, standard ARM GCC and CMake workflows are fully supported — configuration files are included for manual builds.
 
 The lumos tool can already be downloaded [here](www.todo.com) (TODO: Add real link) and is in active development. It is available for Windows, macOS, and Linux.
 
@@ -146,6 +242,14 @@ The MicroBrain ecosystem is designed around a different philosophy:
 
 Every module in the ecosystem is physically and electrically compatible. Mix and match as your application requires. Reuse modules across projects. Start small, scale up.
 
+### One of each, done well
+
+The ecosystem is deliberately curated. There is one IMU shield, not four variants with marginally different specs and a comparison table to wade through. One ToF shield. One barometer module. Each one chosen to cover the use case well, documented clearly, with known driver support and known behaviour in lumos firmware.
+
+This is a conscious trade-off. A platform that offers six IMUs gives you coverage but also gives you a decision to make before you have written a line of code — and if you pick the wrong one, you are on your own. MicroBrain makes that decision for you. The IMU shield does what an IMU should do. The ToF shield does what a ToF sensor should do. You know what you are getting, you know it works with the rest of the ecosystem, and you can focus on building your system rather than evaluating components.
+
+When a genuinely better part becomes available, or when a specific use case demands a different option, the ecosystem will expand — but intentionally, not by accumulation. Breadth for its own sake is complexity in disguise.
+
 ### Why not just put the MCU on every sensor board?
 
 The obvious alternative is to integrate the microcontroller and CAN transceiver directly onto each sensor board — one board for IMU sensing, one for distance measurement, one for motor control. It seems simpler at first glance. In practice, it creates a different set of problems.
@@ -161,6 +265,33 @@ The obvious alternative is to integrate the microcontroller and CAN transceiver 
 **Mixed configurations are possible.** A MicroBrain node can run a shield *and* have peripheral modules attached via the JST connector simultaneously. Need motor control and a barometer on the same node? That's one MicroBrain, one StepperMotorDriver Shield, and one Barometer Module. With integrated boards, combining capabilities on a single node means custom hardware.
 
 The modular approach costs a little more board area per node. In exchange, you get flexibility, lower per-sensor cost, simpler firmware, and a system that can be reconfigured without a soldering iron or a new PCB spin.
+
+---
+
+## How Does It Compare?
+
+Several modular embedded ecosystems exist. Here is how MicroBrain stacks up against the most relevant ones.
+
+| | **MicroBrain** | Adafruit Feather M4 CAN | SparkFun MicroMod | Seeed XIAO + Grove | MIKROE mikroBUS + Click |
+|---|---|---|---|---|---|
+| **MCU** | STM32G0 | ATSAME51 Cortex-M4 | Swappable (RP2040, STM32, ESP32…) | RP2040 / ESP32 / nRF52840 | Host-dependent (STM32, PIC, AVR…) |
+| **CAN FD** | Yes, native | CAN 2.0 only | No active CAN FD board | No | Yes, via Click add-on board |
+| **Shield/expansion connector** | Board-to-board mezzanine | Soldered stacking headers | M.2 board-to-board | Grove 4-pin JST cables | 2×8 pin headers |
+| **Peripheral modules** | JST connector (I2C/UART) | No dedicated port | No dedicated port | Grove cables | No dedicated port |
+| **Shield + peripheral simultaneously** | Yes | No | No | Limited | No |
+| **Solderless out of the box** | Yes | No (headers must be soldered) | Yes (M.2 screw mount) | Yes (since late 2024) | Yes (Click boards press on) |
+| **Form factor** | 17.2 × 17.2 mm | 52 × 23 mm | 22 × 22 mm module + carrier | 21 × 18 mm + expansion board | 25 × 29 mm Click + host board |
+| **Designed for edge deployment** | Yes | No | No | No | No |
+| **Integrated toolchain** | Yes (lumos) | Arduino IDE / CircuitPython | Arduino IDE | Arduino IDE / MicroPython | MIKROE SDK / third-party |
+| **Primary target** | Robotics, drones, edge nodes | Maker / portable IoT | Prototyping / education | Wearables / compact IoT | Industrial / rapid prototyping |
+
+A few notes on the comparison:
+
+**CAN FD** is a meaningful dividing line. CAN FD is the standard communication bus in modern automotive and robotics systems — it offers higher bandwidth and more reliable framing than classic CAN 2.0. Among the boards listed, only MIKROE offers CAN FD, and only via an additional Click board rather than natively. MicroBrain includes the CAN FD transceiver on the core module itself.
+
+**Mezzanine connectors** are not the same as soldered pin headers. The Feather ecosystem stacks Wings on top of the host board via through-hole headers that must be soldered during assembly. MicroBrain's board-to-board mezzanine connector requires no soldering — shields mate directly and can be swapped without tools.
+
+**Edge deployment** is a design intent, not just a form factor claim. MicroBrain is sized and connected to live inside a system permanently, not on a desk during prototyping. The JST connectors, mounting holes, and compact footprint are deliberate choices toward that goal.
 
 ---
 
@@ -197,9 +328,35 @@ Backers will receive production-quality boards, not prototypes.
 
 ---
 
-## Stretch Goals
+## What Comes Next
 
-As the campaign grows, we plan to expand the ecosystem with additional shields and peripheral modules. Community input will shape what gets built next.
+The modules launching with this campaign are the foundation, not the ceiling. The connector standard, the JST pinout, and the lumos toolchain are all designed with expansion in mind. Here is what is already on the roadmap.
+
+### Positioning & Location
+
+**GPS Module** — A peripheral module with a compact GPS receiver for outdoor positioning. Useful for drones, field robots, and any system that needs to know where it is. Connects over UART via the JST connector.
+
+**UWB (Ultra-Wideband) Module** — UWB enables centimetre-accurate relative positioning between nodes, indoors and outdoors alike. A UWB peripheral module would let multiple MicroBrain-equipped devices locate each other precisely — useful for swarm robotics, indoor navigation, and proximity sensing where GPS falls short.
+
+### Display & Visual Output
+
+**Additional OLED sizes and types** — Beyond the 1.54" module launching with the campaign, more screen sizes and panel types are planned to cover a wider range of enclosure constraints and readability requirements.
+
+**LED Driver Shield** — Controllable RGB LEDs or LED arrays for status indication, lighting effects, or signal output. Useful in any system where visual feedback matters — from status indicators on a robot to addressable lighting on a custom installation.
+
+### Human Input
+
+**Button Module** — A simple, clean HID peripheral module for tactile input. Mount it wherever the user needs to interact with the system, connected back to the MicroBrain over the JST cable.
+
+**Encoder Module** — Rotary encoder input for menu navigation, parameter adjustment, or any application that needs relative rotational input. Pairs naturally with a display module for a compact local UI.
+
+**Joystick Module** — Analog joystick input for manual control of robots, gimbals, or any actuated system. Connects over the JST peripheral connector alongside whatever shield is already running.
+
+### The Bigger Picture
+
+Every module added to the ecosystem uses the same connectors, the same power rail, and the same lumos toolchain. A GPS module brought up on one project carries directly to the next. A joystick module developed for a robot controller works without modification on a drone ground station. The investment in learning the ecosystem compounds across every project you build with it.
+
+Community feedback will shape the priority and order of what gets built. If there is a module or shield you need that is not listed here, let us know.
 
 ---
 
